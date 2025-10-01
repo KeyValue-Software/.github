@@ -1,0 +1,3 @@
+# Contributi
+- Apri una branch: feat/..., fix/... o chore/...
+- PR verso main, almeno 1 review
