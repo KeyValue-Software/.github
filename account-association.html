@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Visualizzatore associazione conti</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        line-height: 1.5;
+      }
+
+      body {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 2rem 1rem 4rem;
+      }
+
+      h1,
+      h2 {
+        font-weight: 600;
+      }
+
+      section {
+        margin-bottom: 2rem;
+      }
+
+      label {
+        display: block;
+        margin-top: 1rem;
+        font-weight: 500;
+      }
+
+      input[type="file"],
+      select,
+      button {
+        margin-top: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 1rem;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 2rem;
+      }
+
+      th,
+      td {
+        border: 1px solid #666;
+        padding: 0.5rem;
+        text-align: left;
+      }
+
+      tbody tr:nth-child(odd) {
+        background-color: rgba(0, 0, 0, 0.05);
+      }
+
+      #results-container {
+        overflow-x: auto;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .inline-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      .inline-group label {
+        margin-top: 0;
+      }
+
+      .notice {
+        background: rgba(255, 215, 0, 0.15);
+        border-left: 4px solid #daa520;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1.5rem;
+      }
+
+      @media (max-width: 600px) {
+        body {
+          padding: 1.5rem 1rem 3rem;
+        }
+
+        .inline-group {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Visualizzatore dell'associazione tra conti</h1>
+      <p class="notice">
+        Carica i due file CSV: il primo con i conti del cliente (inclusi gli
+        importi) e il secondo con le associazioni verso i conti target
+        restituite dal programma di matching. Se ancora non disponi di un
+        database, puoi caricarli entrambi manualmente per testare il risultato.
+      </p>
+    </header>
+
+    <section aria-labelledby="upload-title">
+      <h2 id="upload-title">1. Caricamento dei file</h2>
+      <form id="upload-form">
+        <label for="client-file">
+          File conti cliente (CSV)
+          <input id="client-file" name="client-file" type="file" accept=".csv" required />
+        </label>
+        <label for="target-file">
+          File associazioni conti target (CSV)
+          <input id="target-file" name="target-file" type="file" accept=".csv" required />
+        </label>
+      </form>
+    </section>
+
+    <section aria-labelledby="mapping-title" id="mapping-section" class="hidden">
+      <h2 id="mapping-title">2. Configurazione colonne</h2>
+      <p>
+        Seleziona le colonne corrette per collegare i dati. Il campo "Chiave
+        conto cliente" deve contenere lo stesso valore in entrambi i file (ad
+        esempio il codice conto).
+      </p>
+      <div class="inline-group">
+        <label>
+          Conto cliente (file cliente)
+          <select id="client-account-column"></select>
+        </label>
+        <label>
+          Importo (file cliente)
+          <select id="client-amount-column"></select>
+        </label>
+        <label>
+          Chiave conto cliente (file associazioni)
+          <select id="mapping-client-column"></select>
+        </label>
+        <label>
+          Conto target (file associazioni)
+          <select id="mapping-target-column"></select>
+        </label>
+      </div>
+      <button id="generate-button" type="button">Genera tabella</button>
+      <button id="download-button" type="button" class="hidden">
+        Scarica CSV combinato
+      </button>
+    </section>
+
+    <section aria-labelledby="results-title" id="results-section" class="hidden">
+      <h2 id="results-title">3. Risultato</h2>
+      <div id="results-container"></div>
+    </section>
+
+    <template id="table-template">
+      <table>
+        <thead>
+          <tr>
+            <th>Conto cliente</th>
+            <th>Importo</th>
+            <th>Conto target</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </template>
+
+    <script>
+      const clientFileInput = document.getElementById("client-file");
+      const targetFileInput = document.getElementById("target-file");
+      const mappingSection = document.getElementById("mapping-section");
+      const resultsSection = document.getElementById("results-section");
+      const resultsContainer = document.getElementById("results-container");
+      const clientAccountSelect = document.getElementById("client-account-column");
+      const clientAmountSelect = document.getElementById("client-amount-column");
+      const mappingClientSelect = document.getElementById("mapping-client-column");
+      const mappingTargetSelect = document.getElementById("mapping-target-column");
+      const generateButton = document.getElementById("generate-button");
+      const downloadButton = document.getElementById("download-button");
+      const tableTemplate = document.getElementById("table-template");
+
+      let clientData = null;
+      let mappingData = null;
+
+      function resetResults() {
+        resultsContainer.innerHTML = "";
+        resultsSection.classList.add("hidden");
+        downloadButton.classList.add("hidden");
+      }
+
+      function detectDelimiter(text) {
+        const delimiters = [",", ";", "\t", "|"];
+        const scores = new Map(delimiters.map((delimiter) => [delimiter, 0]));
+        let insideQuotes = false;
+        let linesRemaining = 10;
+
+        for (let i = 0; i < text.length && linesRemaining > 0; i += 1) {
+          const char = text[i];
+          const nextChar = text[i + 1];
+
+          if (char === '"') {
+            if (insideQuotes && nextChar === '"') {
+              i += 1;
+            } else {
+              insideQuotes = !insideQuotes;
+            }
+            continue;
+          }
+
+          if (!insideQuotes) {
+            if (scores.has(char)) {
+              scores.set(char, scores.get(char) + 1);
+              continue;
+            }
+            if (char === "\n") {
+              linesRemaining -= 1;
+            } else if (char === "\r") {
+              linesRemaining -= 1;
+              if (nextChar === "\n") {
+                i += 1;
+              }
+            }
+          }
+        }
+
+        const best = Array.from(scores.entries())
+          .filter(([, score]) => score > 0)
+          .sort(([, a], [, b]) => b - a)
+          .map(([delimiter]) => delimiter)[0];
+
+        return best ?? ",";
+      }
+
+      function parseCSV(rawText) {
+        const text = String(rawText ?? "").replace(/^\uFEFF/, "").trim();
+        if (!text) {
+          return [];
+        }
+
+        const delimiter = detectDelimiter(text);
+        const rows = [];
+        let current = "";
+        let insideQuotes = false;
+        const row = [];
+
+        const pushValue = () => {
+          row.push(current);
+          current = "";
+        };
+
+        for (let i = 0; i < text.length; i += 1) {
+          const char = text[i];
+          const nextChar = text[i + 1];
+
+          if (char === '"') {
+            if (insideQuotes && nextChar === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              insideQuotes = !insideQuotes;
+            }
+            continue;
+          }
+
+          if (!insideQuotes && (char === delimiter || char === "\n" || char === "\r")) {
+            pushValue();
+            if (char === "\n") {
+              rows.push(row.splice(0));
+            } else if (char === "\r") {
+              rows.push(row.splice(0));
+              if (nextChar === "\n") {
+                i += 1;
+              }
+            }
+            continue;
+          }
+
+          current += char;
+        }
+
+        if (current !== "" || row.length > 0) {
+          pushValue();
+          rows.push(row.splice(0));
+        }
+
+        return rows.filter((r) => r.some((cell) => cell.trim() !== ""));
+      }
+
+      function normalizeHeaders(headerRow) {
+        if (!headerRow) return [];
+        const seen = new Map();
+        return headerRow.map((column, index) => {
+          const trimmed = (column ?? "").trim();
+          const baseName = trimmed || `Colonna ${index + 1}`;
+          const count = seen.get(baseName) ?? 0;
+          seen.set(baseName, count + 1);
+          if (count === 0) {
+            return baseName;
+          }
+          return `${baseName} (${count + 1})`;
+        });
+      }
+
+      function toObjects(rows, headers) {
+        if (!rows || rows.length <= 1) return [];
+        const body = rows.slice(1);
+        return body.map((cells) => {
+          const entry = {};
+          headers.forEach((column, index) => {
+            entry[column] = cells[index] ?? "";
+          });
+          return entry;
+        });
+      }
+
+      function populateSelect(select, columns) {
+        select.innerHTML = "";
+        columns.forEach((column) => {
+          const option = document.createElement("option");
+          option.value = column;
+          option.textContent = column;
+          select.append(option);
+        });
+      }
+
+      function handleFileUpload(fileInput, callback) {
+        const file = fileInput.files?.[0];
+        if (!file) {
+          callback(null);
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const text = event.target?.result;
+            const rows = parseCSV(text);
+            if (!rows || rows.length === 0) {
+              alert(`Il file ${file.name} è vuoto o non contiene dati validi.`);
+              callback(null);
+              return;
+            }
+
+            const headers = normalizeHeaders(rows[0]);
+            const data = toObjects(rows, headers);
+            callback({
+              data,
+              headers,
+            });
+          } catch (error) {
+            console.error("Errore nella lettura del file", error);
+            alert(
+              `Non è stato possibile leggere il file ${file.name}. Assicurati che sia un CSV valido.`
+            );
+            callback(null);
+          }
+        };
+        reader.readAsText(file, "utf-8");
+      }
+
+      function updateSelects() {
+        if (!clientData || !mappingData) {
+          mappingSection.classList.add("hidden");
+          return;
+        }
+
+        populateSelect(clientAccountSelect, clientData.headers);
+        populateSelect(clientAmountSelect, clientData.headers);
+        populateSelect(mappingClientSelect, mappingData.headers);
+        populateSelect(mappingTargetSelect, mappingData.headers);
+        mappingSection.classList.remove("hidden");
+      }
+
+      function renderTable(rows) {
+        resetResults();
+        const table = tableTemplate.content.firstElementChild.cloneNode(true);
+        const tbody = table.querySelector("tbody");
+
+        if (rows.length === 0) {
+          const emptyRow = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 3;
+          cell.textContent = "Nessuna corrispondenza trovata.";
+          emptyRow.append(cell);
+          tbody.append(emptyRow);
+        } else {
+          rows.forEach(({ clientAccount, clientAmount, targetAccount }) => {
+            const tr = document.createElement("tr");
+
+            [clientAccount, clientAmount, targetAccount ?? "Non associato"].forEach((value) => {
+              const td = document.createElement("td");
+              td.textContent = value;
+              tr.append(td);
+            });
+
+            tbody.append(tr);
+          });
+        }
+
+        resultsContainer.append(table);
+        resultsSection.classList.remove("hidden");
+        downloadButton.classList.remove("hidden");
+      }
+
+      function buildCombinedData() {
+        if (!clientData || !mappingData) return [];
+
+        const clientAccountColumn = clientAccountSelect.value;
+        const clientAmountColumn = clientAmountSelect.value;
+        const mappingClientColumn = mappingClientSelect.value;
+        const mappingTargetColumn = mappingTargetSelect.value;
+
+        const mapping = new Map();
+        mappingData.data.forEach((row) => {
+          const key = row[mappingClientColumn]?.trim();
+          if (!key) return;
+          const targetValue = row[mappingTargetColumn] ?? "";
+          const targets = mapping.get(key) ?? [];
+          if (!targets.includes(targetValue)) {
+            targets.push(targetValue);
+          }
+          mapping.set(key, targets);
+        });
+
+        const combined = [];
+
+        clientData.data.forEach((row) => {
+          const account = row[clientAccountColumn]?.trim() ?? "";
+          const amount = row[clientAmountColumn] ?? "";
+          const targets = mapping.get(account);
+
+          if (!targets || targets.length === 0) {
+            combined.push({
+              clientAccount: account,
+              clientAmount: amount,
+              targetAccount: "",
+            });
+            return;
+          }
+
+          targets.forEach((target, index) => {
+            combined.push({
+              clientAccount: index === 0 ? account : "",
+              clientAmount: index === 0 ? amount : "",
+              targetAccount: target,
+            });
+          });
+        });
+
+        return combined;
+      }
+
+      function downloadCSV(rows) {
+        const header = ["Conto cliente", "Importo", "Conto target"];
+        const csvContent = [
+          header.join(","),
+          ...rows.map((row) =>
+            [row.clientAccount, row.clientAmount, row.targetAccount].map((value) => {
+              if (value == null) return "";
+              const normalized = String(value).replace(/"/g, '""');
+              if (normalized.includes(",") || normalized.includes("\n") || normalized.includes("\r")) {
+                return `"${normalized}"`;
+              }
+              return normalized;
+            }).join(",")
+          ),
+        ].join("\n");
+
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "associazione-conti.csv";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      clientFileInput.addEventListener("change", () => {
+        resetResults();
+        handleFileUpload(clientFileInput, (result) => {
+          clientData = result;
+          updateSelects();
+        });
+      });
+
+      targetFileInput.addEventListener("change", () => {
+        resetResults();
+        handleFileUpload(targetFileInput, (result) => {
+          mappingData = result;
+          updateSelects();
+        });
+      });
+
+      [
+        clientAccountSelect,
+        clientAmountSelect,
+        mappingClientSelect,
+        mappingTargetSelect,
+      ].forEach((select) => {
+        select.addEventListener("change", resetResults);
+      });
+
+      generateButton.addEventListener("click", () => {
+        const rows = buildCombinedData();
+        renderTable(rows);
+      });
+
+      downloadButton.addEventListener("click", () => {
+        const rows = buildCombinedData();
+        downloadCSV(rows);
+      });
+    </script>
+  </body>
+</html>
